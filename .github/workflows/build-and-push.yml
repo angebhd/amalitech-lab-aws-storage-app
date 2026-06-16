@@ -1,0 +1,92 @@
+name: Build and push image to ECR
+
+# Pushing application code builds the container image and pushes it to ECR with
+# two tags: a moving `latest` (what the deploy bundle's task definition points
+# at) and an immutable `<name>_<sha>` for traceability. The `latest` push is the
+# event EventBridge reacts to -> CodePipeline -> CodeDeploy (blue/green).
+#
+# What this workflow deliberately does NOT do (improvement over the previous
+# revision): it does not inject role ARNs into the task definition, and it does
+# not re-upload the deploy bundle on every push. CloudFormation renders the full
+# task definition into SSM Parameter Store, and the bundle (taskdef + appspec)
+# is static, so it is seeded to S3 only once.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "Dockerfile"
+      - "deploy/**"
+      - ".github/workflows/build-and-push.yml"
+  workflow_dispatch: {}
+
+# OIDC: request a short-lived token to assume the AWS role. No static keys.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PROJECT: photo-uploader
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ange_buhendwa_${{ github.sha }}
+        run: |
+          docker build \
+            -t "$REGISTRY/$REPOSITORY:$IMAGE_TAG" \
+            -t "$REGISTRY/$REPOSITORY:latest" .
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Seed deploy bundle (once) from SSM Parameter Store
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          # The task definition is rendered by CloudFormation into SSM (it already
+          # carries the real role ARNs, RDS/S3/CloudFront env, and the :latest
+          # image). The bundle is static, so upload it only if it is not already
+          # in the artifact bucket — no per-push S3 writes.
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="${PROJECT}-artifacts-${ACCOUNT_ID}-${AWS_REGION}"
+          if aws s3api head-object --bucket "$BUCKET" --key config-source.zip >/dev/null 2>&1; then
+            echo "config-source.zip already present — nothing to seed."
+            exit 0
+          fi
+          aws ssm get-parameter --name "/${PROJECT}/deploy/taskdef" \
+            --query 'Parameter.Value' --output text > taskdef.json
+          cp deploy/appspec.yaml appspec.yaml
+          zip -j config-source.zip taskdef.json appspec.yaml
+          aws s3 cp config-source.zip "s3://${BUCKET}/config-source.zip"
+          echo "Seeded config-source.zip to s3://${BUCKET}."
+
+      - name: Push image to ECR
+        env:
+          REGISTRY: ${{ steps.build.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ange_buhendwa_${{ github.sha }}
+        run: |
+          # Push the immutable SHA tag first, then `latest` last: the `latest`
+          # push is the single event EventBridge filters on to start the pipeline.
+          docker push "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+          docker push "$REGISTRY/$REPOSITORY:latest"

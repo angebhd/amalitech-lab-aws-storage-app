@@ -1,0 +1,40 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.0.6'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.amalitech'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	// Web tier (Spring MVC) + the photo-gallery persistence layer.
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	// PostgreSQL driver for Amazon RDS (descriptions/metadata live here).
+	runtimeOnly 'org.postgresql:postgresql'
+
+	// AWS SDK v2 — only the S3 client is needed (images are stored in S3 and
+	// served through CloudFront). The BOM keeps the transitive versions aligned.
+	implementation platform('software.amazon.awssdk:bom:2.31.6')
+	implementation 'software.amazon.awssdk:s3'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	// In-memory database so the context test does not require a live RDS.
+	testRuntimeOnly 'com.h2database:h2'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}

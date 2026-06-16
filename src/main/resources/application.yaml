@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: photo-uploader
+  # Amazon RDS PostgreSQL — connection details are injected as environment
+  # variables by the ECS task definition (password comes from Secrets Manager).
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:photos}
+    username: ${DB_USERNAME:photoadmin}
+    password: ${DB_PASSWORD:postgres}
+  jpa:
+    hibernate:
+      # Create/upgrade the photos table on startup (lab convenience).
+      ddl-auto: update
+    open-in-view: false
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
+
+# Application wiring for S3 storage and CloudFront delivery.
+app:
+  s3:
+    bucket: ${IMAGE_BUCKET:}
+  cloudfront:
+    domain: ${CLOUDFRONT_DOMAIN:}
+  aws:
+    region: ${AWS_REGION:eu-north-1}
+
+server:
+  port: 8080
