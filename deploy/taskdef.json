@@ -1,0 +1,39 @@
+{
+  "family": "photo-uploader-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${ECS_EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${ECS_TASK_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "photo-uploader-app",
+      "image": "<IMAGE1_NAME>",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8080, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "DB_HOST", "value": "${DB_HOST}" },
+        { "name": "DB_PORT", "value": "${DB_PORT}" },
+        { "name": "DB_NAME", "value": "${DB_NAME}" },
+        { "name": "DB_USERNAME", "value": "${DB_USERNAME}" },
+        { "name": "IMAGE_BUCKET", "value": "${IMAGE_BUCKET}" },
+        { "name": "CLOUDFRONT_DOMAIN", "value": "${CLOUDFRONT_DOMAIN}" },
+        { "name": "AWS_REGION", "value": "${AWS_REGION}" }
+      ],
+      "secrets": [
+        { "name": "DB_PASSWORD", "valueFrom": "${DB_SECRET_ARN}:password::" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/photo-uploader",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "app"
+        }
+      }
+    }
+  ]
+}

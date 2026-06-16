@@ -4,9 +4,9 @@ Resources:
       Type: AWS::ECS::Service
       Properties:
         # CodeDeploy substitutes <TASK_DEFINITION> with the revision it registers
-        # from taskdef.json. The taskdef is rendered by CloudFormation into SSM
-        # Parameter Store (/photo-uploader/deploy/taskdef) and pulled into the
-        # deploy bundle by the GitHub Actions workflow — see .github/workflows.
+        # from taskdef.json (in this repo under deploy/). The GitHub Actions
+        # workflow renders that file — role ARNs from repo variables, DB/app
+        # config from SSM — and CodeDeploy fills in the image (<IMAGE1_NAME>).
         TaskDefinition: <TASK_DEFINITION>
         LoadBalancerInfo:
           ContainerName: "photo-uploader-app"

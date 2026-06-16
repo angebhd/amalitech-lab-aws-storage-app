@@ -1,15 +1,16 @@
 name: Build and push image to ECR
 
-# Pushing application code builds the container image and pushes it to ECR with
-# two tags: a moving `latest` (what the deploy bundle's task definition points
-# at) and an immutable `<name>_<sha>` for traceability. The `latest` push is the
-# event EventBridge reacts to -> CodePipeline -> CodeDeploy (blue/green).
-#
-# What this workflow deliberately does NOT do (improvement over the previous
-# revision): it does not inject role ARNs into the task definition, and it does
-# not re-upload the deploy bundle on every push. CloudFormation renders the full
-# task definition into SSM Parameter Store, and the bundle (taskdef + appspec)
-# is static, so it is seeded to S3 only once.
+# On every push to main this:
+#   1. Builds the image and pushes two tags: a moving `latest` (what the
+#      pipeline deploys) and an immutable `<name>_<sha>` for traceability.
+#   2. Renders deploy/taskdef.json into config-source.zip and uploads it to the
+#      pipeline's artifact bucket. The task definition is assembled from three
+#      sources:
+#        - GitHub repo variables -> executionRoleArn / taskRoleArn
+#        - SSM Parameter Store    -> DB endpoint/secret ARN, image bucket, CDN
+#        - CodeDeploy             -> the image (<IMAGE1_NAME>, substituted at deploy)
+#   3. Pushes `latest`, which EventBridge reacts to -> CodePipeline ->
+#      CodeDeploy (blue/green).
 on:
   push:
     branches: [main]
@@ -59,26 +60,44 @@ jobs:
             -t "$REGISTRY/$REPOSITORY:latest" .
           echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
-      - name: Seed deploy bundle (once) from SSM Parameter Store
+      - name: Render and upload deploy bundle
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
+          # Role ARNs come from GitHub repo variables (CloudFormation outputs
+          # TaskExecutionRoleArn / TaskRoleArn — set them as these vars).
+          ECS_EXECUTION_ROLE_ARN: ${{ vars.ECS_EXECUTION_ROLE_ARN }}
+          ECS_TASK_ROLE_ARN: ${{ vars.ECS_TASK_ROLE_ARN }}
         run: |
-          # The task definition is rendered by CloudFormation into SSM (it already
-          # carries the real role ARNs, RDS/S3/CloudFront env, and the :latest
-          # image). The bundle is static, so upload it only if it is not already
-          # in the artifact bucket — no per-push S3 writes.
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          BUCKET="${PROJECT}-artifacts-${ACCOUNT_ID}-${AWS_REGION}"
-          if aws s3api head-object --bucket "$BUCKET" --key config-source.zip >/dev/null 2>&1; then
-            echo "config-source.zip already present — nothing to seed."
-            exit 0
+          set -euo pipefail
+
+          # DB + app config comes from SSM (published by CloudFormation).
+          ssm() { aws ssm get-parameter --name "/${PROJECT}/app/$1" \
+            --query 'Parameter.Value' --output text; }
+          export DB_HOST="$(ssm db-host)"
+          export DB_PORT="$(ssm db-port)"
+          export DB_NAME="$(ssm db-name)"
+          export DB_USERNAME="$(ssm db-username)"
+          export DB_SECRET_ARN="$(ssm db-secret-arn)"
+          export IMAGE_BUCKET="$(ssm image-bucket)"
+          export CLOUDFRONT_DOMAIN="$(ssm cloudfront-domain)"
+
+          # Substitute ONLY our placeholders; leave <IMAGE1_NAME> for CodeDeploy.
+          envsubst '${ECS_EXECUTION_ROLE_ARN} ${ECS_TASK_ROLE_ARN} ${DB_HOST} ${DB_PORT} ${DB_NAME} ${DB_USERNAME} ${DB_SECRET_ARN} ${IMAGE_BUCKET} ${CLOUDFRONT_DOMAIN} ${AWS_REGION}' \
+            < deploy/taskdef.json > taskdef.json
+
+          # Fail loudly if anything stayed unsubstituted or the JSON is invalid.
+          if grep -q '\${' taskdef.json; then
+            echo "ERROR: unsubstituted placeholders remain in taskdef.json:"; cat taskdef.json; exit 1
           fi
-          aws ssm get-parameter --name "/${PROJECT}/deploy/taskdef" \
-            --query 'Parameter.Value' --output text > taskdef.json
+          python3 -c "import json; json.load(open('taskdef.json'))"
+
           cp deploy/appspec.yaml appspec.yaml
           zip -j config-source.zip taskdef.json appspec.yaml
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="${PROJECT}-artifacts-${ACCOUNT_ID}-${AWS_REGION}"
           aws s3 cp config-source.zip "s3://${BUCKET}/config-source.zip"
-          echo "Seeded config-source.zip to s3://${BUCKET}."
+          echo "Uploaded config-source.zip to s3://${BUCKET}."
 
       - name: Push image to ECR
         env:
